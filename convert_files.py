@@ -72,7 +72,7 @@ def write_mp4(frames, video_name='test.mp4', fps=24.0):
     frames = frames - frames.min()
     frames = (frames/frames.max() * 255).astype(np.uint8)
 
-    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     video = cv2.VideoWriter(video_name, fourcc, fps, (width,height))
 
     if layers == 4: # RGBA -> BGR
@@ -285,16 +285,16 @@ def sort_and_filter_files(npz_file):
     raw_keys_matched = np.array(raw_keys_matched)[sorted_indices] # sort by timestamp
 
     # make new dict with sorted raw and metadata
-    npz_file_sorted = {}
+    npy_file_sorted = {}
     for frame_count, raw_key in enumerate(raw_keys_matched):
-        npz_file_sorted[f'raw_{frame_count}'] = npz_file[raw_key]
-        npz_file_sorted[f'raw_{frame_count}']['frame_count'] = frame_count
+        npy_file_sorted[f'raw_{frame_count}'] = npz_file[raw_key]
+        npy_file_sorted[f'raw_{frame_count}']['frame_count'] = frame_count
     
-    npz_file_sorted['num_raw_frames'] = len(raw_keys_matched)
-    npz_file_sorted['motion'] = npz_file['motion']
-    npz_file_sorted['characteristics'] = npz_file['characteristics']
+    npy_file_sorted['num_raw_frames'] = len(raw_keys_matched)
+    # npy_file_sorted['motion'] = npz_file['motion']
+    npy_file_sorted['characteristics'] = npz_file['characteristics']
 
-    return npz_file_sorted
+    return npy_file_sorted
 
 def colorize_frame(npz_file, frame, downsample_factor=1, max_brightness=1.0):
     color_filter_arrangement = npz_file['characteristics']['color_filter_arrangement']
@@ -340,13 +340,13 @@ def colorize_frame(npz_file, frame, downsample_factor=1, max_brightness=1.0):
 
     return rgb_frame
 
-# save rgb preview video of data
-def save_preview_video(npz_file, save_path):
-    frames = np.array([npz_file[f'raw_{i}']['raw'] for i in range(npz_file['num_raw_frames'])])
-    max_brightness = np.percentile(colorize_frame(npz_file, frames[0], 2), 98)
-    frames = np.array([colorize_frame(npz_file, frame, 2, max_brightness) for frame in frames])
+# get low dynamic range frames
+def get_LDR_frames(npy_file):
+    frames = np.array([npy_file[f'raw_{i}']['raw'] for i in range(npy_file['num_raw_frames'])])
+    max_brightness = np.percentile(colorize_frame(npy_file, frames[0], 2), 98)
+    frames = np.array([colorize_frame(npy_file, frame, 2, max_brightness) for frame in frames])
     frames = np.rot90(frames, 3, axes=(1,2)) # rotate to portrait mode
-    write_mp4(frames, save_path, fps=15.0)
+    return frames
 
 def has_subfolders(folder):
     for _, dirnames, _ in os.walk(folder):
@@ -362,17 +362,17 @@ def process_bundle(bundle_path, base_path):
         metadata_paths = natsorted(glob(path.join(bundle_path, "IMG*.bin")))
         assert len(raw_paths) == len(metadata_paths) # matched data
 
-        npz_file = {}
-        npz_file["bundle_name"] = path.basename(bundle_path)
+        npy_file = {}
+        npy_file["bundle_name"] = path.basename(bundle_path)
 
         print(f"Processing: {bundle_path}")
-        process_motion(npz_file, motion_path)
-        process_characteristics(npz_file, characteristics_path)
-        process_metadata(npz_file, metadata_paths)
-        process_raw(npz_file, raw_paths)
-        npz_file = sort_and_filter_files(npz_file)
+        # process_motion(npy_file, motion_path)
+        process_characteristics(npy_file, characteristics_path)
+        process_metadata(npy_file, metadata_paths)
+        process_raw(npy_file, raw_paths)
+        npy_file = sort_and_filter_files(npy_file)
 
-        # write to npz file
+        # Create a new folder to save the processed data
         if has_subfolders(base_path): # add processed_ prefix to parent folder
             parent, child = path.dirname(bundle_path), path.basename(bundle_path)
             parent = path.join(path.dirname(parent), "processed_" + path.basename(parent))
@@ -381,9 +381,60 @@ def process_bundle(bundle_path, base_path):
             save_path = path.join(path.dirname(bundle_path), "processed_" + path.basename(bundle_path))
 
         os.makedirs(save_path, exist_ok=True)
-        print(f"Saving to: {save_path}")
-        np.savez_compressed(path.join(save_path, "frame_bundle.npz"), **npz_file)
-        save_preview_video(npz_file, path.join(save_path, "preview.mp4"))
+
+        # Save all data to a single npy file
+        # print(f"Saving to: {npy_save_path}")
+        # npy_save_path = path.join(save_path, "frame_bundle.npy")
+        # np.save(npy_save_path, npy_file)
+
+        print("Saving metadata...")
+
+        # Save timestamps into timestamps.txt
+        with open(path.join(save_path, "timestamps.txt"), "w") as f:
+            for i in range(npy_file['num_raw_frames']):
+                f.write(f"{npy_file[f'raw_{i}']['timestamp']}\n")    
+
+        # Save exposure times into exposure_times.txt
+        with open(path.join(save_path, "exposure_times.txt"), "w") as f:
+            for i in range(npy_file['num_raw_frames']):
+                f.write(f"{npy_file[f'raw_{i}']['exposure_time']}\n")
+
+        # Save ISOs into ISOs.txt
+        with open(path.join(save_path, "ISOs.txt"), "w") as f:
+            for i in range(npy_file['num_raw_frames']):
+                f.write(f"{npy_file[f'raw_{i}']['ISO']}\n")
+
+        # Save apertures into apertures.txt
+        with open(path.join(save_path, "apertures.txt"), "w") as f:
+            for i in range(npy_file['num_raw_frames']):
+                f.write(f"{npy_file[f'raw_{i}']['aperture']}\n")
+
+        # Save focal lengths into focals.txt
+        with open(path.join(save_path, "focals.txt"), "w") as f:
+            for i in range(npy_file['num_raw_frames']):
+                f.write(f"{npy_file[f'raw_{i}']['focal_length']}\n")
+        
+        # Save focus distances into focus_distances.txt
+        with open(path.join(save_path, "focus_distances.txt"), "w") as f:
+            for i in range(npy_file['num_raw_frames']):
+                f.write(f"{npy_file[f'raw_{i}']['focus_distance']}\n")
+
+        # Get LDR frames
+        ldr_frames = get_LDR_frames(npy_file)
+
+        # Save LDR images to images/ folder, with timestamp as filename
+        print("Saving images...")
+        os.makedirs(path.join(save_path, "images"), exist_ok=True)
+        for i, frame in enumerate(ldr_frames):
+            cv2.imwrite(
+                path.join(save_path, "images", f"{npy_file[f'raw_{i}']['timestamp']}.jpg"),
+                cv2.cvtColor((frame*255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            )
+
+        # Save preview video
+        video_save_path = path.join(save_path, "preview.mp4")
+        print(f"Saving to: {video_save_path}")
+        write_mp4(ldr_frames, video_save_path, fps=15.0)
         print("Done.")
 
     except Exception as e:
