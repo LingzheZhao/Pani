@@ -77,6 +77,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.navArgs
 import com.example.android.camera2.basic.R
 import com.example.android.camera2.basic.databinding.FragmentCameraBinding
+import com.example.android.camera2.basic.fragments.ListenerArrayBlockingQueue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.coroutineScope
@@ -114,6 +115,9 @@ class CameraFragment : Fragment() {
     var navSelectedCamera: Int = 0  // 0 - Wide, 1 - Ultrawide, 2 - Tele, 3 - 2X, 4 - 10X
     var navISO: Int = 1000
     var navExposure: Long = 10000
+    var navTargetBrightness: Int = 127
+    var navCenterWidth: Int = 640
+    var navCenterHeight: Int = 480
     var navFocal: Float = 1.0F
     var navLockAF: Boolean = true
     var navLockAE: Boolean = true
@@ -123,7 +127,7 @@ class CameraFragment : Fragment() {
     var navMyAutoExposure: Boolean = false
     var navTrash: Boolean = false // delete files after writing
     var navFilename: String = "0"
-    var navMaxFPS: Float = 22F
+    var navMaxFPS: Float = 15F
 
     lateinit var navInfoTextView: TextView
     lateinit var navFramesValue: TextView
@@ -407,6 +411,9 @@ class CameraFragment : Fragment() {
 
         val navEditFilename = requireActivity().findViewById<EditText>(R.id.filename_input)
         val navEditExposure = requireActivity().findViewById<EditText>(R.id.nav_exposure)
+        val navEditTargetBrightness = requireActivity().findViewById<EditText>(R.id.nav_target_brightness)
+        val navEditCenterWidth = requireActivity().findViewById<EditText>(R.id.nav_center_metering_width)
+        val navEditCenterHeight = requireActivity().findViewById<EditText>(R.id.nav_center_metering_height)
         val navEditISO = requireActivity().findViewById<EditText>(R.id.nav_iso)
         val navEditFocal = requireActivity().findViewById<EditText>(R.id.nav_focal)
         val navEditMaxFPS = requireActivity().findViewById<EditText>(R.id.nav_max_fps)
@@ -445,6 +452,45 @@ class CameraFragment : Fragment() {
 
         navEditExposure.setOnClickListener {
             navEditExposure.isCursorVisible = true
+        }
+
+        navEditTargetBrightness.setOnEditorActionListener { v, actionId, event ->
+            if (v.text.isNotEmpty() && actionId == EditorInfo.IME_ACTION_DONE || event?.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_ENTER) {
+                navTargetBrightness = v.text.toString().toInt()
+                restartCameraStream()
+            }
+            navEditTargetBrightness.isCursorVisible = false
+            false
+        }
+
+        navEditTargetBrightness.setOnClickListener {
+            navEditTargetBrightness.isCursorVisible = true
+        }
+
+        navEditCenterWidth.setOnEditorActionListener { v, actionId, event ->
+            if (v.text.isNotEmpty() && actionId == EditorInfo.IME_ACTION_DONE || event?.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_ENTER) {
+                navCenterWidth = v.text.toString().toInt()
+                restartCameraStream()
+            }
+            navEditCenterWidth.isCursorVisible = false
+            false
+        }
+
+        navEditCenterWidth.setOnClickListener {
+            navEditCenterWidth.isCursorVisible = true
+        }
+
+        navEditCenterHeight.setOnEditorActionListener { v, actionId, event ->
+            if (v.text.isNotEmpty() && actionId == EditorInfo.IME_ACTION_DONE || event?.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_ENTER) {
+                navCenterHeight = v.text.toString().toInt()
+                restartCameraStream()
+            }
+            navEditCenterHeight.isCursorVisible = false
+            false
+        }
+
+        navEditCenterHeight.setOnClickListener {
+            navEditCenterHeight.isCursorVisible = true
         }
 
         navEditISO.setOnEditorActionListener { v, actionId, event ->
@@ -643,10 +689,29 @@ class CameraFragment : Fragment() {
         @Suppress("ControlFlowWithEmptyBody") while (imageReader.acquireNextImage() != null) {
         }
         Log.d(TAG, "Starting capture.") // Start a new image queue
-        val imageQueue = ArrayBlockingQueue<Image>(imageBufferSize)
+        val imageQueue = ListenerArrayBlockingQueue<Image>(imageBufferSize)
         val requestHashQueue = ConcurrentLinkedQueue<Int>()
         val requestsInFlight = AtomicInteger(0) // how many capture requests are in flight
         val dispatcherWorkStealing = Executors.newWorkStealingPool(Runtime.getRuntime().availableProcessors()).asCoroutineDispatcher()
+
+        // Set the listener
+        imageQueue.setOnItemAddedListener { image ->
+            // Handle the image added to the queue
+            lifecycleScope.launch(Dispatchers.Main) {
+                val brightness = getAverageBrightness(image, navCenterWidth, navCenterHeight)
+                if (brightness > 1) {
+                    currentExposure = calculateNewExposure(brightness)
+                    navExposure = currentExposure
+                    // update the UI
+                    val inverseExposure = 1 / (navExposure / 1e9)
+                    val roundedFocal = String.format("%.2f", currentFocal) // update display info
+                    val text = "<font color=#808080>ISO:</font> ${currentISO} <font color=#808080>Exposure:</font>1/${inverseExposure.toInt()} <font color=#808080>Focus:</font> ${roundedFocal}"
+                    requireActivity().runOnUiThread {
+                        navInfoTextView.text = Html.fromHtml(text, Html.FROM_HTML_MODE_LEGACY)
+                    }
+                }
+            }
+        }
 
         imageReader.setOnImageAvailableListener(
             {
@@ -654,17 +719,6 @@ class CameraFragment : Fragment() {
                 val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
                     Log.d(TAG, "Image available in queue: ${image.timestamp}")
                     imageQueue.add(image)
-//                    lifecycleScope.launch(Dispatchers.Default) {
-                        val cropWidth = 640
-                        val cropHeight = 480
-                        val brightness = getAverageBrightness(image, cropWidth, cropHeight)
-                        if (brightness > 1) {
-                            navExposure = calculateNewExposure(brightness)
-                            //Only the original thread that created a view hierarchy can touch its views. Expected: main Calling: imageReaderThread
-//                        val navEditExposure = requireActivity().findViewById<EditText>(R.id.nav_exposure)
-//                        navEditExposure.setText((1 / (navExposure / 1e9)).toInt().toString())
-                        }
-//                    }
             }, imageReaderHandler)
 
         while (capturingBurst.get()) {
@@ -804,6 +858,12 @@ class CameraFragment : Fragment() {
 
         imageReader.close()
         Log.d(TAG, "Done capturing burst.")
+
+        // reset stream
+        lifecycleScope.launch(Dispatchers.Main) {
+            restartCameraStream()
+        }
+
     }
 
     private fun saveMotion() {
@@ -1000,19 +1060,19 @@ class CameraFragment : Fragment() {
     }
 
     private fun calculateNewExposure(brightness: Double): Long {
-        val targetBrightness = 90.0
         val currentExposureSec = navExposure.toDouble() / 1e9
         val currentBrightness = brightness
 
-        // Get the maximum exposure time
-        val maxExposure = 1000000000L // 1 second
-        val minExposure = 1000L // 1 millisecond
+        // Get the maximum exposure time from navMaxFPS
+        val maxExposure = (1 / navMaxFPS * 1e9).toLong()
+        // Get the minimum exposure time
+        val minExposure = 1000L
         var maxExposureSec = maxExposure.toDouble() / 1e9
 
         // Calculate the new exposure time
         val newExposureSec = (256.0 - currentBrightness) * currentExposureSec * maxExposureSec / (
-            (targetBrightness - currentBrightness) * currentExposureSec +
-                (256.0 - targetBrightness) * maxExposureSec
+            (navTargetBrightness - currentBrightness) * currentExposureSec +
+                (256.0 - navTargetBrightness) * maxExposureSec
         )
 
         val newExposure = (newExposureSec * 1e9).toLong()
