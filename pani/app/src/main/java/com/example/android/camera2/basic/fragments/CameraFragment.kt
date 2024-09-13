@@ -34,7 +34,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.graphics.ImageFormat
-import android.graphics.Rect
 import android.hardware.HardwareBuffer
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -48,7 +47,6 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
-import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.ExifInterface
@@ -77,7 +75,6 @@ import androidx.drawerlayout.widget.DrawerLayout
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.navArgs
-import com.example.android.camera2.basic.CameraActivity
 import com.example.android.camera2.basic.R
 import com.example.android.camera2.basic.databinding.FragmentCameraBinding
 import kotlinx.coroutines.Dispatchers
@@ -91,8 +88,7 @@ import java.io.Closeable
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.lang.Integer.max
-import java.lang.Integer.min
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -124,6 +120,7 @@ class CameraFragment : Fragment() {
     var navLockOIS: Boolean = false
     var navManualFocus: Boolean = false
     var navManualExposure: Boolean = false
+    var navMyAutoExposure: Boolean = false
     var navTrash: Boolean = false // delete files after writing
     var navFilename: String = "0"
     var navMaxFPS: Float = 22F
@@ -259,7 +256,7 @@ class CameraFragment : Fragment() {
 
         // Set UI settings
 
-        if (navManualExposure) {
+        if (navManualExposure or navMyAutoExposure) {
             captureRequest.apply {
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 set(CaptureRequest.SENSOR_EXPOSURE_TIME, navExposure)
@@ -417,6 +414,7 @@ class CameraFragment : Fragment() {
         val navSwitchLockAF = requireActivity().findViewById<Switch>(R.id.nav_lock_AF)
         val navSwitchLockOIS = requireActivity().findViewById<Switch>(R.id.nav_lock_OIS)
         val navSwitchManualE = requireActivity().findViewById<Switch>(R.id.nav_manual_exposure)
+        val navSwitchMyAutoE = requireActivity().findViewById<Switch>(R.id.nav_my_auto_exposure)
         val navSwitchManualF = requireActivity().findViewById<Switch>(R.id.nav_manual_focus)
         val navSwitchTrash = requireActivity().findViewById<Switch>(R.id.nav_trash)
         val navRadioCamera = requireActivity().findViewById<RadioGroup>(R.id.radio_group)
@@ -510,6 +508,20 @@ class CameraFragment : Fragment() {
                 navEditExposure.setText((1 / (currentExposure / 1e9)).toInt().toString())
             } else {
                 navManualExposure = false
+            }
+            restartCameraStream()
+        }
+
+        navSwitchMyAutoE.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) {
+                navManualExposure = false
+                navMyAutoExposure = true
+                navISO = currentISO
+                navEditISO.setText(currentISO.toString())
+                navEditExposure.setText((1 / (currentExposure / 1e9)).toInt().toString())
+            } else {
+                navManualExposure = true
+                navMyAutoExposure = false
             }
             restartCameraStream()
         }
@@ -636,11 +648,24 @@ class CameraFragment : Fragment() {
         val requestsInFlight = AtomicInteger(0) // how many capture requests are in flight
         val dispatcherWorkStealing = Executors.newWorkStealingPool(Runtime.getRuntime().availableProcessors()).asCoroutineDispatcher()
 
-        imageReader.setOnImageAvailableListener({ reader ->
-                                                    val image = reader.acquireNextImage()
-                                                    Log.d(TAG, "Image available in queue: ${image.timestamp}")
-                                                    imageQueue.add(image)
-                                                }, imageReaderHandler)
+        imageReader.setOnImageAvailableListener(
+            {
+                reader ->
+                val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                    Log.d(TAG, "Image available in queue: ${image.timestamp}")
+                    imageQueue.add(image)
+//                    lifecycleScope.launch(Dispatchers.Default) {
+                        val cropWidth = 640
+                        val cropHeight = 480
+                        val brightness = getAverageBrightness(image, cropWidth, cropHeight)
+                        if (brightness > 1) {
+                            navExposure = calculateNewExposure(brightness)
+                            //Only the original thread that created a view hierarchy can touch its views. Expected: main Calling: imageReaderThread
+//                        val navEditExposure = requireActivity().findViewById<EditText>(R.id.nav_exposure)
+//                        navEditExposure.setText((1 / (navExposure / 1e9)).toInt().toString())
+                        }
+//                    }
+            }, imageReaderHandler)
 
         while (capturingBurst.get()) {
             delay(((1/navMaxFPS) * 1000).toLong())
@@ -659,7 +684,7 @@ class CameraFragment : Fragment() {
                 set(CaptureRequest.CONTROL_AWB_LOCK, true) // always lock white balance
             }
 
-            if (navManualExposure) {
+            if (navManualExposure or navMyAutoExposure) {
                 captureRequest.apply {
                     set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                     set(CaptureRequest.SENSOR_EXPOSURE_TIME, navExposure)
@@ -766,6 +791,7 @@ class CameraFragment : Fragment() {
         }
 
         imageReader.setOnImageAvailableListener(null, null)
+
         requestHashQueue.clear()
 
         while (requestsInFlight.get() > 0) { // wait until in flight requests are cleared
@@ -943,6 +969,61 @@ class CameraFragment : Fragment() {
 
     private fun createFile(descriptor: String, extension: String): File {
         return File(saveFolderDir, "$descriptor.$extension")
+    }
+
+    private fun getAverageBrightness(image: Image, cropWidth: Int, cropHeight: Int): Double {
+        val buffer: ByteBuffer = image.planes[0].buffer
+        val pixelStride: Int = image.planes[0].pixelStride
+        val rowStride: Int = image.planes[0].rowStride
+
+        var sumBrightness: Long = 0
+        var pixelCount: Int = 0
+
+        val startX = (image.width - cropWidth) / 2
+        val startY = (image.height - cropHeight) / 2
+
+        for (y in startY until startY + cropHeight step 2) { // Process every other row
+            for (x in startX until startX + cropWidth step 2) { // Process every other column
+                try {
+                    val pixel = buffer.get(y * rowStride + x * pixelStride).toInt() and 0xFF
+                    sumBrightness += pixel
+                    pixelCount++
+                } catch (e: IllegalStateException) {
+                    // Handle the buffer inaccessible error
+                    Log.e(TAG, "Buffer is inaccessible: ${e.message}")
+                    return 0.0 // or handle it in another way
+                }
+            }
+        }
+
+        return if (pixelCount > 0) sumBrightness.toDouble() / pixelCount else 0.0
+    }
+
+    private fun calculateNewExposure(brightness: Double): Long {
+        val targetBrightness = 90.0
+        val currentExposureSec = navExposure.toDouble() / 1e9
+        val currentBrightness = brightness
+
+        // Get the maximum exposure time
+        val maxExposure = 1000000000L // 1 second
+        val minExposure = 1000L // 1 millisecond
+        var maxExposureSec = maxExposure.toDouble() / 1e9
+
+        // Calculate the new exposure time
+        val newExposureSec = (256.0 - currentBrightness) * currentExposureSec * maxExposureSec / (
+            (targetBrightness - currentBrightness) * currentExposureSec +
+                (256.0 - targetBrightness) * maxExposureSec
+        )
+
+        val newExposure = (newExposureSec * 1e9).toLong()
+
+        // Clamp the exposure time to the min and max values
+        if (newExposure < minExposure) {
+            return minExposure
+        } else if (newExposure > maxExposure) {
+            return maxExposure
+        }
+        return newExposure
     }
 
 }

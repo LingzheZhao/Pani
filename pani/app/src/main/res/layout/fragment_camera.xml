@@ -193,6 +193,11 @@
         android:layout_marginTop="25dp"
         android:fitsSystemWindows="true">
 
+<!--     add a scrolling bar  -->
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="match_parent"
@@ -266,6 +271,27 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:checked="true" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="horizontal"
+                android:paddingTop="5dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="My Auto E:"
+                    android:textSize="18dp" />
+
+                <Switch
+                    android:id="@+id/nav_my_auto_exposure"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="false" />
 
             </LinearLayout>
 
@@ -449,7 +475,7 @@
 
 
         </LinearLayout>
-
+        </ScrollView>
     </com.google.android.material.navigation.NavigationView>
 
 
